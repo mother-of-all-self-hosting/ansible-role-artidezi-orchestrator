@@ -28,5 +28,8 @@
         name: ansible-role-docker
 
     - name: Ensure the network standing in for the reverse proxy's exists
-      community.docker.docker_network:
-        name: "{{ artidezi_orchestrator_molecule_proxy_network }}"
+      ansible.builtin.command:
+        cmd: docker network create {{ artidezi_orchestrator_molecule_proxy_network }}
+      register: artidezi_orchestrator_molecule_proxy_network_result
+      changed_when: artidezi_orchestrator_molecule_proxy_network_result.rc == 0
+      failed_when: artidezi_orchestrator_molecule_proxy_network_result.rc != 0 and 'already exists' not in artidezi_orchestrator_molecule_proxy_network_result.stderr
