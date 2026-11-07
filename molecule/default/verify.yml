@@ -1,0 +1,330 @@
+# SPDX-FileCopyrightText: 2026 Slavi Pantaleev
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+# What this suite is guarding against
+#
+# The orchestrator answering /healthz says little about the role.
+# So the suite also checks that it runs confined, that it read the secrets the role installed,
+# that a configuration ArtiDezi rejects changes nothing, and that 2 instances on 1 host stay apart, down to uninstalling one of them.
+
+- name: Verify the ArtiDezi orchestrator
+  hosts: all
+  # Both inventory hosts are the same machine.
+  serial: 1
+  become: true
+  # The role depends on the base roles, which use facts.
+  gather_facts: true
+
+  vars:
+    artidezi_orchestrator_molecule_base_url: "http://{{ artidezi_orchestrator_container_http_host_bind_port }}"
+    artidezi_orchestrator_molecule_base_path: "/{{ artidezi_orchestrator_identifier }}"
+    artidezi_orchestrator_molecule_role: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') | basename }}"
+
+  tasks:
+    - name: Verify that the ArtiDezi orchestrator works
+      block:
+        # Only for the image this role installs: variables loaded this way outrank the scenario's group_vars.
+        - name: Load the role defaults
+          ansible.builtin.include_vars:
+            file: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}/defaults/main.yml"
+            name: artidezi_orchestrator_defaults
+
+        - name: Wait for the systemd unit to become active (up to 180s)
+          ansible.builtin.systemd_service:
+            name: "{{ artidezi_orchestrator_identifier }}.service"
+          register: artidezi_orchestrator_service
+          until: artidezi_orchestrator_service.status.ActiveState == 'active'
+          retries: 36
+          delay: 5
+
+        - name: Retrieve the systemd unit log for debugging
+          when: artidezi_orchestrator_debug_service_enabled | bool
+          ansible.builtin.command:
+            cmd: "journalctl --no-pager --output=cat --unit={{ artidezi_orchestrator_identifier }}.service"
+          changed_when: false
+
+        - name: Wait for the health endpoint to answer
+          ansible.builtin.uri:
+            url: "{{ artidezi_orchestrator_molecule_base_url }}/healthz"
+            return_content: true
+          register: artidezi_orchestrator_healthz
+          until: artidezi_orchestrator_healthz.status | default(0) == 200
+          retries: 30
+          delay: 2
+
+        - name: Assert the health endpoint is healthy
+          ansible.builtin.assert:
+            that: artidezi_orchestrator_healthz.content == 'ok'
+            success_msg: "/healthz answers"
+
+        - name: Fetch the login page
+          ansible.builtin.uri:
+            url: "{{ artidezi_orchestrator_molecule_base_url }}/login"
+            status_code: 200
+
+        # The orchestrator has the token only if it read the file the role installed.
+        - name: Call the admin API with the admin token
+          ansible.builtin.uri:
+            url: "{{ artidezi_orchestrator_molecule_base_url }}/admin/v1/workers"
+            headers:
+              Authorization: "Bearer {{ artidezi_orchestrator_secrets['admin-token'] }}"
+            status_code: 200
+
+        - name: Call the admin API with a wrong token
+          ansible.builtin.uri:
+            url: "{{ artidezi_orchestrator_molecule_base_url }}/admin/v1/workers"
+            headers:
+              Authorization: Bearer wrong
+            status_code: 403
+
+        - name: Inspect the container
+          ansible.builtin.command:
+            cmd: "docker container inspect {{ artidezi_orchestrator_identifier }}"
+          register: artidezi_orchestrator_inspect
+          changed_when: false
+
+        - name: Assert the container runs the pinned image, confined
+          vars:
+            container: "{{ (artidezi_orchestrator_inspect.stdout | from_json) | first }}"
+            router: "traefik.http.routers.{{ artidezi_orchestrator_identifier }}.rule"
+          ansible.builtin.assert:
+            that:
+              - container.Config.Image == 'ghcr.io/devture/artidezi:' + artidezi_orchestrator_defaults.artidezi_orchestrator_version
+              - container.Config.User == artidezi_orchestrator_uid ~ ':' ~ artidezi_orchestrator_gid
+              - container.HostConfig.ReadonlyRootfs
+              - container.HostConfig.CapDrop == ['ALL']
+              - "'no-new-privileges' in container.HostConfig.SecurityOpt"
+              - not container.HostConfig.Privileged
+              - artidezi_orchestrator_identifier in container.NetworkSettings.Networks
+              - artidezi_orchestrator_molecule_proxy_network in container.NetworkSettings.Networks
+              - container.Config.Labels[router] == 'Host(`' + artidezi_orchestrator_hostname + '`)'
+            success_msg: "The container is read-only, without capabilities, and runs as {{ artidezi_orchestrator_uid }}"
+
+        - name: Inspect the installed files
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop:
+            - "{{ artidezi_orchestrator_molecule_base_path }}/config/artidezi.yaml"
+            - "{{ artidezi_orchestrator_molecule_base_path }}/secrets/admin-token"
+            - "{{ artidezi_orchestrator_molecule_base_path }}/secrets/worker-1-token"
+            - "{{ artidezi_orchestrator_molecule_base_path }}/secrets/forgejo-token"
+          register: artidezi_orchestrator_files
+
+        - name: Assert the configuration and the secrets are readable only by root and the service
+          ansible.builtin.assert:
+            that:
+              - item.stat.exists
+              - item.stat.pw_name == 'root'
+              - item.stat.gid == artidezi_orchestrator_gid
+              - item.stat.mode == '0440'
+          loop: "{{ artidezi_orchestrator_files.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+
+        - name: Inspect the database
+          ansible.builtin.stat:
+            path: "{{ artidezi_orchestrator_molecule_base_path }}/data/artidezi.sqlite"
+          register: artidezi_orchestrator_database
+
+        - name: Assert the data ends up in this instance's data directory
+          ansible.builtin.assert:
+            that:
+              - artidezi_orchestrator_database.stat.exists
+              - artidezi_orchestrator_database.stat.uid == artidezi_orchestrator_uid
+
+        - name: Run the check-config helper
+          ansible.builtin.command:
+            cmd: "{{ artidezi_orchestrator_molecule_base_path }}/bin/check-config"
+          changed_when: false
+
+        # A credential going away has to take its file along.
+        - name: Create a file for a secret which is gone
+          ansible.builtin.copy:
+            content: stale
+            dest: "{{ artidezi_orchestrator_molecule_base_path }}/secrets/removed-token"
+            mode: '0440'
+
+        - name: Include the roles the role depends on
+          ansible.builtin.include_role:
+            name: "{{ role_name }}"
+            public: true
+          loop:
+            - com.devture.ansible.role.playbook_help
+            - com.devture.ansible.role.systemd_docker_base
+          loop_control:
+            loop_var: role_name
+
+        - name: Checksum the configuration and a secret, before the rejected run
+          ansible.builtin.stat:
+            path: "{{ item }}"
+            checksum_algorithm: sha256
+          loop:
+            - "{{ artidezi_orchestrator_molecule_base_path }}/config/artidezi.yaml"
+            - "{{ artidezi_orchestrator_molecule_base_path }}/secrets/admin-token"
+            - "{{ artidezi_orchestrator_molecule_base_path }}/secrets/removed-token"
+          register: artidezi_orchestrator_checksums_before
+
+        - name: Prepare a rejected configuration and a new secret
+          ansible.builtin.set_fact:
+            artidezi_orchestrator_molecule_rejected_extension_yaml: |
+              {{ artidezi_orchestrator_configuration_extension_yaml }}
+              not_a_field: true
+            artidezi_orchestrator_molecule_rejected_secrets: "{{ artidezi_orchestrator_secrets | combine({'admin-token': 'molecule-another-admin-token-0123456789'}) }}"
+
+        - name: Install a configuration which ArtiDezi rejects
+          block:
+            - name: Run the role with an unknown field in the configuration and a new secret
+              ansible.builtin.include_role:
+                name: "{{ artidezi_orchestrator_molecule_role }}"
+              vars:
+                artidezi_orchestrator_configuration_extension_yaml: "{{ artidezi_orchestrator_molecule_rejected_extension_yaml }}"
+                artidezi_orchestrator_secrets: "{{ artidezi_orchestrator_molecule_rejected_secrets }}"
+
+            - name: Remember that the role accepted it
+              ansible.builtin.set_fact:
+                artidezi_orchestrator_rejection: nothing
+          rescue:
+            - name: Remember why the role failed
+              ansible.builtin.set_fact:
+                artidezi_orchestrator_rejection: "{{ ansible_failed_result.msg }}"
+
+        - name: Checksum the configuration and a secret, after the rejected run
+          ansible.builtin.stat:
+            path: "{{ item }}"
+            checksum_algorithm: sha256
+          loop:
+            - "{{ artidezi_orchestrator_molecule_base_path }}/config/artidezi.yaml"
+            - "{{ artidezi_orchestrator_molecule_base_path }}/secrets/admin-token"
+            - "{{ artidezi_orchestrator_molecule_base_path }}/secrets/removed-token"
+          register: artidezi_orchestrator_checksums_after
+
+        - name: Find candidate configurations left behind
+          ansible.builtin.find:
+            paths: "{{ artidezi_orchestrator_molecule_base_path }}/config"
+            patterns: "*.candidate"
+          register: artidezi_orchestrator_candidates
+
+        - name: Assert the rejected configuration changed nothing
+          ansible.builtin.assert:
+            that:
+              - "'unknown field `not_a_field`' in artidezi_orchestrator_rejection | string"
+              - artidezi_orchestrator_checksums_after.results | map(attribute='stat.checksum') | list == artidezi_orchestrator_checksums_before.results | map(attribute='stat.checksum') | list
+              - artidezi_orchestrator_candidates.matched == 0
+            fail_msg: "Rejected with: {{ artidezi_orchestrator_rejection }}"
+            success_msg: "Rejected with: {{ artidezi_orchestrator_rejection }}"
+
+        - name: Run the role with the valid configuration
+          ansible.builtin.include_role:
+            name: "{{ artidezi_orchestrator_molecule_role }}"
+
+        - name: Inspect the file of the secret which is gone
+          ansible.builtin.stat:
+            path: "{{ artidezi_orchestrator_molecule_base_path }}/secrets/removed-token"
+          register: artidezi_orchestrator_removed_secret
+
+        - name: Assert the secret's file is gone, and that this needs a restart
+          ansible.builtin.assert:
+            that:
+              - not artidezi_orchestrator_removed_secret.stat.exists
+              - artidezi_orchestrator_restart_necessary | bool
+
+      rescue:
+        # Whatever went wrong, the reason is almost always in the unit's log.
+        - name: Retrieve the systemd unit log
+          ansible.builtin.command:
+            cmd: "journalctl --no-pager --output=cat --unit={{ artidezi_orchestrator_identifier }}.service"
+          register: artidezi_orchestrator_service_log
+          changed_when: false
+
+        - name: Show the systemd unit log
+          ansible.builtin.debug:
+            var: artidezi_orchestrator_service_log.stdout_lines
+
+        - name: Fail because verification did not pass
+          ansible.builtin.fail:
+            msg: "ArtiDezi orchestrator verification failed. The systemd unit's log is printed above."
+
+- name: Verify nothing was quietly restarting
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Watch the restart counters
+      when: artidezi_orchestrator_restarts_check_enabled | bool
+      block:
+        # `Restart=always` means the unit reads `active` while it is crash-looping,
+        # so `active` on its own says very little.
+        - name: Sample the restart counter
+          ansible.builtin.systemd_service:
+            name: "{{ artidezi_orchestrator_identifier }}.service"
+          register: artidezi_orchestrator_restarts_before
+
+        # Comfortably longer than the unit's `RestartSec=30`, so a crash loop has to tick at least once inside the window.
+        - name: Watch the orchestrator for 45 seconds
+          ansible.builtin.pause:
+            seconds: 45
+
+        - name: Sample the restart counter again
+          ansible.builtin.systemd_service:
+            name: "{{ artidezi_orchestrator_identifier }}.service"
+          register: artidezi_orchestrator_restarts_after
+
+        - name: Assert the orchestrator did not restart while it was up
+          ansible.builtin.assert:
+            that:
+              - artidezi_orchestrator_restarts_after.status.NRestarts == artidezi_orchestrator_restarts_before.status.NRestarts
+            fail_msg: "The orchestrator restarted while it was supposedly up ({{ artidezi_orchestrator_restarts_before.status.NRestarts }} -> {{ artidezi_orchestrator_restarts_after.status.NRestarts }} restarts)"
+            success_msg: "The orchestrator did not restart over 45 seconds of watching ({{ artidezi_orchestrator_restarts_after.status.NRestarts }} restarts so far)"
+
+- name: Uninstall the second instance
+  hosts: second-instance
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Include the roles the role depends on
+      ansible.builtin.include_role:
+        name: "{{ role_name }}"
+        public: true
+      loop:
+        - com.devture.ansible.role.playbook_help
+        - com.devture.ansible.role.systemd_docker_base
+      loop_control:
+        loop_var: role_name
+
+    - name: Run the role with the instance disabled
+      ansible.builtin.include_role:
+        name: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') | basename }}"
+      vars:
+        artidezi_orchestrator_enabled: false
+
+    - name: Inspect what the instance left behind
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "/{{ artidezi_orchestrator_identifier }}"
+        - "/etc/systemd/system/{{ artidezi_orchestrator_identifier }}.service"
+      register: artidezi_orchestrator_uninstalled
+
+    - name: Inspect the containers and networks that remain
+      ansible.builtin.shell:
+        cmd: docker ps --all --format '{{ '{{' }}.Names{{ '}}' }}'; docker network ls --format '{{ '{{' }}.Name{{ '}}' }}'
+      register: artidezi_orchestrator_docker_objects
+      changed_when: false
+
+    - name: Assert the instance is gone
+      ansible.builtin.assert:
+        that:
+          - artidezi_orchestrator_uninstalled.results | selectattr('stat.exists') | list | length == 0
+          - artidezi_orchestrator_identifier not in artidezi_orchestrator_docker_objects.stdout_lines
+
+- name: Verify the first instance survived the second one's uninstallation
+  hosts: all:!second-instance
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Check the health endpoint
+      ansible.builtin.uri:
+        url: "http://{{ artidezi_orchestrator_container_http_host_bind_port }}/healthz"
+        status_code: 200

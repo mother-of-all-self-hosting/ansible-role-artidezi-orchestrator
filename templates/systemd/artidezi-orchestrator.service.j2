@@ -1,0 +1,67 @@
+#jinja2: lstrip_blocks: True
+{#
+SPDX-FileCopyrightText: 2026 Slavi Pantaleev
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+#}
+[Unit]
+Description=ArtiDezi orchestrator ({{ artidezi_orchestrator_identifier }})
+{% for service in artidezi_orchestrator_systemd_required_services_list %}
+Requires={{ service }}
+After={{ service }}
+{% endfor %}
+{% for service in artidezi_orchestrator_systemd_wanted_services_list %}
+Wants={{ service }}
+{% endfor %}
+DefaultDependencies=no
+
+[Service]
+Type=simple
+Environment="HOME={{ devture_systemd_docker_base_systemd_unit_home_path }}"
+ExecStartPre={{ devture_systemd_docker_base_host_command_sh }} -c '{{ artidezi_orchestrator_container_cleanup_command | trim | replace("\n", " ") }}'
+
+# The only writable places are the data directory and a tmpfs /tmp.
+ExecStartPre={{ devture_systemd_docker_base_host_command_docker }} create \
+      --rm \
+      --name={{ artidezi_orchestrator_identifier }} \
+      --log-driver=none \
+      --user={{ artidezi_orchestrator_uid }}:{{ artidezi_orchestrator_gid }} \
+      --read-only \
+      --cap-drop=ALL \
+      --security-opt=no-new-privileges \
+      --network={{ artidezi_orchestrator_container_network }} \
+      {% if artidezi_orchestrator_container_http_host_bind_port %}
+      --publish={{ artidezi_orchestrator_container_http_host_bind_port }}:8080 \
+      {% endif %}
+      --tmpfs=/tmp:rw,noexec,nosuid,size={{ artidezi_orchestrator_container_tmp_size }} \
+      --env=HOME={{ artidezi_orchestrator_container_data_path }} \
+      --env=RUST_LOG={{ artidezi_orchestrator_log_level }} \
+      --label-file={{ artidezi_orchestrator_base_path }}/labels \
+      --mount type=bind,src={{ artidezi_orchestrator_config_path }}/artidezi.yaml,dst=/etc/artidezi/artidezi.yaml,ro \
+      --mount type=bind,src={{ artidezi_orchestrator_secrets_path }},dst=/etc/artidezi/secrets,ro \
+      --mount type=bind,src={{ artidezi_orchestrator_data_path }},dst={{ artidezi_orchestrator_container_data_path }} \
+      {% for arg in artidezi_orchestrator_container_extra_arguments %}
+      {{ arg }} \
+      {% endfor %}
+      {{ artidezi_orchestrator_container_image }} \
+      serve \
+      --config /etc/artidezi/artidezi.yaml \
+      --secrets-dir /etc/artidezi/secrets \
+      --listen 0.0.0.0:8080 \
+      --lease-ttl-seconds {{ artidezi_orchestrator_lease_ttl_seconds }} \
+      --tick-seconds {{ artidezi_orchestrator_tick_seconds }}{% if artidezi_orchestrator_ui_enabled | bool %} --ui-enabled{% endif %}{% for arg in artidezi_orchestrator_process_extra_arguments %} {{ arg }}{% endfor %}
+
+{% for network in artidezi_orchestrator_container_additional_networks %}
+ExecStartPre={{ devture_systemd_docker_base_host_command_docker }} network connect {{ network }} {{ artidezi_orchestrator_identifier }}
+{% endfor %}
+
+ExecStart={{ devture_systemd_docker_base_host_command_docker }} start --attach {{ artidezi_orchestrator_identifier }}
+
+ExecStop=-{{ devture_systemd_docker_base_host_command_sh }} -c '{{ devture_systemd_docker_base_host_command_docker }} stop -t {{ artidezi_orchestrator_container_stop_grace_time_seconds }} {{ artidezi_orchestrator_identifier }} 2>/dev/null || true'
+ExecStop=-{{ devture_systemd_docker_base_host_command_sh }} -c '{{ devture_systemd_docker_base_host_command_docker }} rm {{ artidezi_orchestrator_identifier }} 2>/dev/null || true'
+Restart=always
+RestartSec=30
+SyslogIdentifier={{ artidezi_orchestrator_identifier }}
+
+[Install]
+WantedBy=multi-user.target

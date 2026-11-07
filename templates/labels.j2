@@ -1,0 +1,27 @@
+{#
+SPDX-FileCopyrightText: 2026 Slavi Pantaleev
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+#}
+
+{% if artidezi_orchestrator_container_labels_traefik_enabled %}
+traefik.enable=true
+
+{% if artidezi_orchestrator_container_labels_traefik_docker_network %}
+traefik.docker.network={{ artidezi_orchestrator_container_labels_traefik_docker_network }}
+{% endif %}
+
+traefik.http.routers.{{ artidezi_orchestrator_identifier }}.rule={{ artidezi_orchestrator_container_labels_traefik_rule }}
+traefik.http.routers.{{ artidezi_orchestrator_identifier }}.service={{ artidezi_orchestrator_identifier }}
+traefik.http.routers.{{ artidezi_orchestrator_identifier }}.entrypoints={{ artidezi_orchestrator_container_labels_traefik_entrypoints }}
+traefik.http.routers.{{ artidezi_orchestrator_identifier }}.tls={{ artidezi_orchestrator_container_labels_traefik_tls | to_json }}
+{% if artidezi_orchestrator_container_labels_traefik_tls %}
+traefik.http.routers.{{ artidezi_orchestrator_identifier }}.tls.certResolver={{ artidezi_orchestrator_container_labels_traefik_tls_certResolver }}
+{% endif %}
+
+traefik.http.services.{{ artidezi_orchestrator_identifier }}.loadbalancer.server.port=8080
+{% endif %}
+
+{% for label in artidezi_orchestrator_container_labels_additional_labels %}
+{{ label }}
+{% endfor %}

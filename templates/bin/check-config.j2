@@ -1,0 +1,19 @@
+#!/bin/sh
+{#
+SPDX-FileCopyrightText: 2026 Slavi Pantaleev
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+#}
+# Managed by Ansible.
+# Validates an ArtiDezi configuration file with the configured image, reporting every problem found.
+# Usage: check-config [FILE]
+set -eu
+file="${1:-{{ artidezi_orchestrator_config_path }}/artidezi.yaml}"
+exec {{ devture_systemd_docker_base_host_command_docker }} run --rm --pull=never \
+	--network=none \
+	--read-only \
+	--cap-drop=ALL \
+	--security-opt=no-new-privileges \
+	--user={{ artidezi_orchestrator_uid }}:{{ artidezi_orchestrator_gid }} \
+	--mount type=bind,src="$(realpath "$file")",dst=/config.yaml,ro \
+	{{ artidezi_orchestrator_container_image }} validate-config /config.yaml

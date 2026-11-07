@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: 2026 Slavi Pantaleev
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+
+- name: Fail if required ArtiDezi orchestrator settings are not defined
+  ansible.builtin.fail:
+    msg: "You need to define a required configuration setting (`{{ item }}`)."
+  when: "lookup('vars', item, default='') | string | length == 0"
+  with_items:
+    - artidezi_orchestrator_identifier
+    - artidezi_orchestrator_uid
+    - artidezi_orchestrator_gid
+    - artidezi_orchestrator_container_image
+
+- name: Fail if the ArtiDezi orchestrator's Traefik hostname is not defined
+  ansible.builtin.fail:
+    msg: "You need to define `artidezi_orchestrator_hostname` (or `artidezi_orchestrator_container_labels_traefik_hostname`) for the Traefik labels."
+  when: artidezi_orchestrator_container_labels_traefik_enabled | bool and artidezi_orchestrator_container_labels_traefik_hostname | length == 0
+
+# It ends up in a Traefik rule, between backticks.
+- name: Fail if the ArtiDezi orchestrator's Traefik hostname is invalid
+  ansible.builtin.fail:
+    msg: "artidezi_orchestrator_container_labels_traefik_hostname (`{{ artidezi_orchestrator_container_labels_traefik_hostname }}`) must be a hostname: letters, digits, dots and dashes."
+  when: artidezi_orchestrator_container_labels_traefik_hostname | length > 0 and artidezi_orchestrator_container_labels_traefik_hostname is not match('^[A-Za-z0-9.-]+$')
+
+# ArtiDezi validates the configuration itself (see install.yml), but it does not know where the role mounts the data directory.
+- name: Fail if instance.data_dir is not where the data directory is mounted
+  ansible.builtin.fail:
+    msg: "`instance.data_dir` (`{{ artidezi_orchestrator_configuration.instance.data_dir }}`) must be `{{ artidezi_orchestrator_container_data_path }}` (`artidezi_orchestrator_container_data_path`), or the orchestrator's data would be lost with its container."
+  when: artidezi_orchestrator_configuration.instance.data_dir != artidezi_orchestrator_container_data_path
+
+- name: Fail if the web UI is enabled without accounts
+  ansible.builtin.fail:
+    msg: "`artidezi_orchestrator_ui_enabled` needs `ui_access` in the configuration, or the orchestrator refuses to start."
+  when: artidezi_orchestrator_ui_enabled | bool and 'ui_access' not in artidezi_orchestrator_configuration
+
+- name: Fail if a forge to check is not a GitHub forge of the configuration
+  ansible.builtin.fail:
+    msg: "`artidezi_orchestrator_github_check_forges` lists `{{ item }}`, which is not a forge with `provider: github` in the configuration."
+  when: (artidezi_orchestrator_configuration.forges | default({}))[item].provider | default('') != 'github'
+  loop: "{{ artidezi_orchestrator_github_check_forges }}"
+
+# The orchestrator reads the secrets only when it starts, so without these checks a mistake shows up as a crash loop after the run.
+# The loops below go over names only, which keeps the values out of the output.
+- name: Fail if a secret's name is not a plain name
+  ansible.builtin.fail:
+    msg: "`{{ item }}` in `artidezi_orchestrator_secrets` is not a plain name: letters, digits, `-`, `_` and `.`, not starting with a `.`."
+  loop: "{{ artidezi_orchestrator_secrets | list | reject('match', '^[A-Za-z0-9_-][A-Za-z0-9._-]*$') | list }}"
+
+- name: Fail if a secret is not a non-empty string
+  ansible.builtin.fail:
+    msg: "`{{ item }}` in `artidezi_orchestrator_secrets` must be a non-empty string."
+  loop: "{{ (artidezi_orchestrator_secrets | dict2items | rejectattr('value', 'string') | map(attribute='key') | list) + (artidezi_orchestrator_secrets | dict2items | selectattr('value', 'string') | selectattr('value', 'match', '^\\s*$') | map(attribute='key') | list) }}"
+
+- name: Fail if a credential of the configuration is not in artidezi_orchestrator_secrets
+  ansible.builtin.fail:
+    msg: "The configuration refers to the credential `{{ item }}`, which is not in `artidezi_orchestrator_secrets`."
+  loop: "{{ artidezi_orchestrator_required_secret_names | unique | reject('in', artidezi_orchestrator_secrets | list) | list }}"
+
+- name: Fail if an admin or worker token is shorter than 32 characters
+  ansible.builtin.fail:
+    msg: "The token `{{ item }}` must be at least 32 characters long, without whitespace. Generate one with e.g. `openssl rand -hex 32`."
+  loop: "{{ artidezi_orchestrator_secrets | dict2items | selectattr('key', 'in', artidezi_orchestrator_token_secret_names) | rejectattr('value', 'match', '^\\s*\\S{32,}\\s*$') | map(attribute='key') | list }}"
+
+# The orchestrator refuses to start with shared tokens.
+- name: Fail if 2 admin or worker tokens have the same value
+  ansible.builtin.assert:
+    that: >-
+      (artidezi_orchestrator_token_secret_names | unique | map('extract', artidezi_orchestrator_secrets) | map('trim') | list | unique | length)
+      == (artidezi_orchestrator_token_secret_names | length)
+  no_log: true

@@ -1,0 +1,102 @@
+# SPDX-FileCopyrightText: 2026 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2026 spatterlight
+# SPDX-FileCopyrightText: 2026 Suguru Hirahara
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+dependency:
+  name: galaxy
+  options:
+    requirements-file: requirements.yml
+    force: true
+driver:
+  name: docker
+platforms:
+  - name: artidezi-orchestrator-${MOLECULE_DISTRO:-ubuntu2604}-default
+    image: "geerlingguy/docker-${MOLECULE_DISTRO:-ubuntu2604}-ansible:latest"
+    command: ${MOLECULE_DOCKER_COMMAND:-""}
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      # Docker inside the instance stores images via containerd.
+      # Its storage cannot use overlay on top of the instance's own overlay filesystem, so a volume puts it on a real filesystem.
+      - /var/lib/containerd
+    # Remove volumes along with the instance, so that local runs do not leave gigabytes behind.
+    keep_volumes: false
+    cgroupns_mode: host
+    privileged: true
+    pre_build_image: true
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      callback_result_format: yaml
+  inventory:
+    # A second inventory host on the same machine, the way mash-playbook runs several instances:
+    # only its identifier and its port differ.
+    hosts:
+      all:
+        hosts:
+          second-instance:
+            ansible_connection: community.docker.docker
+            ansible_host: artidezi-orchestrator-${MOLECULE_DISTRO:-ubuntu2604}-default
+    host_vars:
+      second-instance:
+        artidezi_orchestrator_identifier: artidezi-orchestrator-second
+        artidezi_orchestrator_hostname: second.artidezi.example.com
+        artidezi_orchestrator_container_http_host_bind_port: 127.0.0.1:8081
+    group_vars:
+      all:
+        # Helper variables
+        artidezi_orchestrator_debug_service_enabled: false
+        artidezi_orchestrator_restarts_check_enabled: true
+        # A network standing in for the reverse proxy's. prepare.yml creates it.
+        artidezi_orchestrator_molecule_proxy_network: molecule-proxy
+
+        # Variables for the ArtiDezi orchestrator
+        artidezi_orchestrator_identifier: artidezi-orchestrator
+        artidezi_orchestrator_uid: 1000
+        artidezi_orchestrator_gid: 1000
+        artidezi_orchestrator_hostname: artidezi.example.com
+        artidezi_orchestrator_container_http_host_bind_port: 127.0.0.1:8080
+        artidezi_orchestrator_container_additional_networks_custom:
+          - "{{ artidezi_orchestrator_molecule_proxy_network }}"
+        artidezi_orchestrator_ui_enabled: true
+        artidezi_orchestrator_secrets:
+          admin-token: molecule-admin-token-0123456789abcdef
+          worker-1-token: molecule-worker-token-0123456789abcdef
+          forgejo-token: molecule-forgejo-token
+        # The smallest configuration that gives every kind of credential a use.
+        # The hash is that of a throwaway password. Its dollar signs are doubled, as Molecule expands variables in this file.
+        artidezi_orchestrator_configuration_extension_yaml: |
+          instance:
+            bot_identity:
+              name: ArtiDezi
+              email: artidezi@example.com
+          model_endpoints: {}
+          worker_pools:
+            maintenance:
+              harness_sandbox: disabled
+              harnesses: [codex]
+              workers:
+                worker-1: {token_ref: worker-1-token}
+          agent_profiles: {}
+          forges:
+            forgejo:
+              provider: forgejo
+              api_base_url: https://forgejo.example.com
+              credential_ref: forgejo-token
+              bot_login: artidezi
+          projects: {}
+          ui_access:
+            schema_version: 1
+            accounts:
+              operator:
+                display_name: Operator
+                initial_password_hash: "$$argon2id$$v=19$$m=19456,t=2,p=1$$wUuhukGRgk3m+8hcolR8QQ$$SdPBUZG7SA2sLDQssA9aLB1qNQkDIx7+Mr/IeL/DuW4"
+                instance_admin: true
+  env:
+    # Workaround for https://github.com/ansible/molecule/issues/4391
+    ANSIBLE_ROLES_PATH: ${MOLECULE_PROJECT_DIRECTORY}/..:/.ansible/roles:/usr/share/ansible/roles:/etc/ansible/roles:~/.ansible/roles
+verifier:
+  name: ansible

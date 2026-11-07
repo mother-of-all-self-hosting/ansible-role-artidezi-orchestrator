@@ -1,0 +1,218 @@
+# SPDX-FileCopyrightText: 2026 Slavi Pantaleev
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+# Project source code URL: https://github.com/devture/artidezi
+#
+# ArtiDezi's orchestrator: the trusted HTTP server and web UI which workers and the admin API talk to.
+# Workers run elsewhere and are not installed by this role.
+
+artidezi_orchestrator_enabled: true
+
+artidezi_orchestrator_identifier: artidezi-orchestrator
+
+artidezi_orchestrator_base_path: "/{{ artidezi_orchestrator_identifier }}"
+artidezi_orchestrator_config_path: "{{ artidezi_orchestrator_base_path }}/config"
+artidezi_orchestrator_secrets_path: "{{ artidezi_orchestrator_base_path }}/secrets"
+# SQLite, artifacts and Git caches. ArtiDezi wants it on a local filesystem.
+artidezi_orchestrator_data_path: "{{ artidezi_orchestrator_base_path }}/data"
+# Helpers for Ansible and humans: check-config.
+artidezi_orchestrator_bin_path: "{{ artidezi_orchestrator_base_path }}/bin"
+
+# The container runs as this user.
+artidezi_orchestrator_uid: ""
+artidezi_orchestrator_gid: ""
+
+# ArtiDezi is released as CalVer (`vYYYY.MM.DD.N`, the image tag), which is not semver: `versioning=loose` compares all 4 parts.
+# Updates are never automerged: these versions carry no compatibility meaning, and workers have to be upgraded along with the orchestrator.
+# The role's own tags are `v<artidezi_orchestrator_version>-<release>` (see bin/compute-next-tag.sh).
+# renovate: datasource=docker depName=ghcr.io/devture/artidezi versioning=loose
+artidezi_orchestrator_version: v2026.11.07.3
+
+# An image under `localhost/` is never pulled: it has to be on the host already (built or loaded by hand), or the role fails.
+artidezi_orchestrator_container_image: "{{ artidezi_orchestrator_container_image_registry_prefix }}devture/artidezi:{{ artidezi_orchestrator_container_image_tag }}"
+artidezi_orchestrator_container_image_tag: "{{ artidezi_orchestrator_version }}"
+artidezi_orchestrator_container_image_registry_prefix: "{{ artidezi_orchestrator_container_image_registry_prefix_upstream }}"
+artidezi_orchestrator_container_image_registry_prefix_upstream: "{{ artidezi_orchestrator_container_image_registry_prefix_upstream_default }}"
+artidezi_orchestrator_container_image_registry_prefix_upstream_default: ghcr.io/
+
+# The base container network. It will be auto-created by this role if it doesn't exist already.
+# The orchestrator reaches the forges through it.
+artidezi_orchestrator_container_network: "{{ artidezi_orchestrator_identifier }}"
+
+# Control if the container network is deleted on uninstalling.
+artidezi_orchestrator_container_network_deletion_enabled: true
+
+# A list of additional container networks that the container would be connected to.
+# The role does not create these networks, so make sure they already exist.
+# Use this to expose the container to a reverse proxy, which runs in a different container network.
+artidezi_orchestrator_container_additional_networks: "{{ (artidezi_orchestrator_container_additional_networks_auto + artidezi_orchestrator_container_additional_networks_custom) | unique }}"
+artidezi_orchestrator_container_additional_networks_auto: []
+artidezi_orchestrator_container_additional_networks_custom: []
+
+# Publishes the container's port (8080) on the host, e.g. "127.0.0.1:8080".
+# Empty does not publish it.
+# Instances on the same host need different values.
+artidezi_orchestrator_container_http_host_bind_port: ""
+
+# Where the data directory is mounted in the container. `instance.data_dir` in the configuration has to match it.
+artidezi_orchestrator_container_data_path: /var/lib/artidezi
+
+# The size of the tmpfs mounted at /tmp: the rest of the container's filesystem is read-only.
+artidezi_orchestrator_container_tmp_size: 256m
+
+# Additional arguments for `docker create`.
+artidezi_orchestrator_container_extra_arguments: "{{ artidezi_orchestrator_container_extra_arguments_auto + artidezi_orchestrator_container_extra_arguments_custom }}"
+artidezi_orchestrator_container_extra_arguments_auto: []
+artidezi_orchestrator_container_extra_arguments_custom: []
+
+# Additional arguments for `artidezi serve`.
+artidezi_orchestrator_process_extra_arguments: "{{ artidezi_orchestrator_process_extra_arguments_auto + artidezi_orchestrator_process_extra_arguments_custom }}"
+artidezi_orchestrator_process_extra_arguments_auto: []
+artidezi_orchestrator_process_extra_arguments_custom: []
+
+# The public hostname, which needs HTTPS: workers refuse plain HTTP, and the web UI's session cookie needs it.
+# ArtiDezi has to be at the root of a hostname: the web UI's links are absolute and its `__Host-` cookie cannot be scoped to a path.
+artidezi_orchestrator_hostname: ""
+
+# Traefik routing, as labels on the container.
+artidezi_orchestrator_container_labels_traefik_enabled: true
+artidezi_orchestrator_container_labels_traefik_docker_network: "{{ artidezi_orchestrator_container_network }}"
+artidezi_orchestrator_container_labels_traefik_hostname: "{{ artidezi_orchestrator_hostname }}"
+artidezi_orchestrator_container_labels_traefik_rule: "Host(`{{ artidezi_orchestrator_container_labels_traefik_hostname }}`)"
+artidezi_orchestrator_container_labels_traefik_entrypoints: web-secure
+artidezi_orchestrator_container_labels_traefik_tls: "{{ artidezi_orchestrator_container_labels_traefik_entrypoints != 'web' }}"
+artidezi_orchestrator_container_labels_traefik_tls_certResolver: default  # noqa var-naming
+
+# artidezi_orchestrator_container_labels_additional_labels contains a list of additional labels to add to the container label file.
+# To add your own custom labels, use `artidezi_orchestrator_container_labels_additional_labels_custom`.
+artidezi_orchestrator_container_labels_additional_labels: "{{ artidezi_orchestrator_container_labels_additional_labels_auto + artidezi_orchestrator_container_labels_additional_labels_custom }}"
+artidezi_orchestrator_container_labels_additional_labels_auto: []
+artidezi_orchestrator_container_labels_additional_labels_custom: []
+
+# Units the orchestrator needs (required), and ones it should start with (wanted).
+artidezi_orchestrator_systemd_required_services_list: "{{ artidezi_orchestrator_systemd_required_services_list_default + artidezi_orchestrator_systemd_required_services_list_auto + artidezi_orchestrator_systemd_required_services_list_custom }}"
+artidezi_orchestrator_systemd_required_services_list_default: "{{ [devture_systemd_docker_base_docker_service_name] if devture_systemd_docker_base_docker_service_name else [] }}"
+artidezi_orchestrator_systemd_required_services_list_auto: []
+artidezi_orchestrator_systemd_required_services_list_custom: []
+
+artidezi_orchestrator_systemd_wanted_services_list: "{{ artidezi_orchestrator_systemd_wanted_services_list_default + artidezi_orchestrator_systemd_wanted_services_list_auto + artidezi_orchestrator_systemd_wanted_services_list_custom }}"
+artidezi_orchestrator_systemd_wanted_services_list_default: []
+artidezi_orchestrator_systemd_wanted_services_list_auto: []
+artidezi_orchestrator_systemd_wanted_services_list_custom: []
+
+# How long the orchestrator gets to stop before it is killed.
+# More than the usual default, for its database and for requests in progress.
+artidezi_orchestrator_container_stop_grace_time_seconds: 10
+
+# Controls how long the pre-start cleanup waits for Docker to release the container's name.
+artidezi_orchestrator_container_cleanup_timeout_seconds: "{{ devture_systemd_docker_base_container_cleanup_timeout_seconds }}"
+
+# Controls the delay between pre-start cleanup retries.
+artidezi_orchestrator_container_cleanup_retry_delay_seconds: "{{ devture_systemd_docker_base_container_cleanup_retry_delay_seconds }}"
+
+# Shell command used in the systemd pre-start phase to deterministically remove a stale container and wait until Docker releases its name.
+artidezi_orchestrator_container_cleanup_command: |
+  i=0;
+  while [ "$i" -lt {{ artidezi_orchestrator_container_cleanup_timeout_seconds }} ]; do
+  {{ devture_systemd_docker_base_host_command_docker }} stop -t {{ artidezi_orchestrator_container_stop_grace_time_seconds }} {{ artidezi_orchestrator_identifier }} >/dev/null 2>&1 || true;
+  {{ devture_systemd_docker_base_host_command_docker }} rm -f {{ artidezi_orchestrator_identifier }} >/dev/null 2>&1 || true;
+  if {{ devture_systemd_docker_base_host_command_docker }} container inspect {{ artidezi_orchestrator_identifier }} >/dev/null 2>&1; then
+  i=$((i + 1));
+  sleep {{ artidezi_orchestrator_container_cleanup_retry_delay_seconds }};
+  continue;
+  fi;
+  if {{ devture_systemd_docker_base_host_command_docker }} info >/dev/null 2>&1; then
+  exit 0;
+  fi;
+  echo "Failed to query Docker daemon while cleaning up {{ artidezi_orchestrator_identifier }}" >&2;
+  exit 1;
+  done;
+  echo "Failed to remove stale container {{ artidezi_orchestrator_identifier }} after {{ artidezi_orchestrator_container_cleanup_timeout_seconds }} attempts" >&2;
+  exit 1
+
+# The log filter (`RUST_LOG`).
+artidezi_orchestrator_log_level: info
+
+# Enables the web UI (named accounts only), which also needs `ui_access` in the configuration.
+artidezi_orchestrator_ui_enabled: false
+
+# How long a lease stays valid without a heartbeat (30-86400).
+artidezi_orchestrator_lease_ttl_seconds: 120
+
+# How often forge maintenance runs. Lease recovery runs separately, every 5 seconds.
+artidezi_orchestrator_tick_seconds: 30
+
+# ArtiDezi's configuration (see `etc/example.yaml` and `docs/user-guide/operations.md` in its repository).
+#
+# Most of it (forges, model_endpoints, worker_pools, agent_profiles, projects, ui_access) describes your own setup, so it goes into `artidezi_orchestrator_configuration_extension_yaml`, which is merged over the default below.
+# Dictionaries are merged recursively; lists are replaced.
+# ArtiDezi rejects unknown fields, and the role runs its own validation on the result.
+# Only the worker tokens and forge credentials are stored as secrets on this host, so they need to be in `artidezi_orchestrator_secrets`, by `token_ref` and `credential_ref`.
+#
+# Example:
+#
+# artidezi_orchestrator_configuration_extension_yaml: |
+#   instance:
+#     bot_identity:
+#       name: ArtiDezi
+#       email: artidezi@example.com
+#   model_endpoints:
+#     openai:
+#       provider: openai
+#       auth_mode: openai_api_key
+#       credential_ref: openai
+#   worker_pools:
+#     maintenance:
+#       harness_sandbox: disabled
+#       harnesses: [codex]
+#       workers:
+#         worker-1: {token_ref: worker-1-token}
+#   agent_profiles: {...}
+#   forges: {...}
+#   projects: {...}
+artidezi_orchestrator_configuration_extension_yaml: |
+  # Your configuration goes here.
+
+artidezi_orchestrator_configuration_extension: "{{ artidezi_orchestrator_configuration_extension_yaml | from_yaml if artidezi_orchestrator_configuration_extension_yaml | from_yaml is mapping else {} }}"
+
+# The parts of the configuration which depend on how this role runs the container.
+artidezi_orchestrator_configuration_default_yaml: |
+  schema_version: 1
+  instance:
+    name: {{ artidezi_orchestrator_identifier | to_json }}
+    data_dir: {{ artidezi_orchestrator_container_data_path | to_json }}
+    admin_token_ref: admin-token
+
+artidezi_orchestrator_configuration_default: "{{ artidezi_orchestrator_configuration_default_yaml | from_yaml }}"
+
+# The whole configuration. Override this to manage all of it yourself.
+artidezi_orchestrator_configuration: "{{ artidezi_orchestrator_configuration_default | combine(artidezi_orchestrator_configuration_extension, recursive=True) }}"
+
+# The files of the secrets directory, as credential name (`admin_token_ref`, `token_ref`, `credential_ref`) -> value.
+# A name that isn't here any more loses its file.
+#
+# Example:
+#
+# artidezi_orchestrator_secrets:
+#   admin-token: "{{ vault_artidezi_orchestrator_admin_token }}"
+#   worker-1-token: "{{ vault_artidezi_orchestrator_worker_1_token }}"
+#   forgejo-token: "{{ vault_artidezi_orchestrator_forgejo_token }}"
+artidezi_orchestrator_secrets: {}
+
+# GitHub forges (keys of `forges`) to run `artidezi github-check` for, before a configuration gets installed.
+# It verifies the App's access to the configured repositories, so it needs the network, and a failing GitHub fails the run.
+artidezi_orchestrator_github_check_forges: []
+
+# artidezi_orchestrator_restart_necessary controls whether the systemd service will be restarted (when true) or merely started (when false) by the systemd service manager role (when conditional restart is enabled).
+#
+# This value is automatically computed during installation based on whether its configuration, labels, secrets, systemd service file, container network or container image changed.
+# The default of `false` means "no restart needed" — appropriate when the role's installation tasks haven't run (e.g. due to --tags skipping them).
+artidezi_orchestrator_restart_necessary: false
+
+# The credentials the orchestrator reads at startup: it does not start without them.
+# Model endpoints' credentials are not among them: those are on the workers.
+# Computed: do not override.
+artidezi_orchestrator_token_secret_names: "{{ [artidezi_orchestrator_configuration.instance.admin_token_ref] + ((artidezi_orchestrator_configuration.worker_pools | default({})).values() | map(attribute='workers', default={}) | map('dict2items') | flatten(levels=1) | map(attribute='value.token_ref') | list) }}"
+artidezi_orchestrator_required_secret_names: "{{ artidezi_orchestrator_token_secret_names + ((artidezi_orchestrator_configuration.forges | default({})).values() | rejectattr('provider', 'equalto', 'fake') | map(attribute='credential_ref') | list) }}"

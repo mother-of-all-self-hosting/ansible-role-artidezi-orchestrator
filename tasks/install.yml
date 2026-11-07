@@ -1,0 +1,240 @@
+# SPDX-FileCopyrightText: 2026 Slavi Pantaleev
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+
+- name: Ensure ArtiDezi orchestrator paths exist
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    mode: "{{ item.mode }}"
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+  loop:
+    - {path: "{{ artidezi_orchestrator_base_path }}", mode: '0750', owner: root, group: "{{ artidezi_orchestrator_gid }}"}
+    - {path: "{{ artidezi_orchestrator_bin_path }}", mode: '0750', owner: root, group: root}
+    - {path: "{{ artidezi_orchestrator_config_path }}", mode: '0750', owner: root, group: "{{ artidezi_orchestrator_gid }}"}
+    - {path: "{{ artidezi_orchestrator_secrets_path }}", mode: '0750', owner: root, group: "{{ artidezi_orchestrator_gid }}"}
+    # The orchestrator sets 0700 itself whenever it starts.
+    - {path: "{{ artidezi_orchestrator_data_path }}", mode: '0700', owner: "{{ artidezi_orchestrator_uid }}", group: "{{ artidezi_orchestrator_gid }}"}
+
+- name: Ensure the ArtiDezi orchestrator container image is pulled
+  when: not artidezi_orchestrator_container_image.startswith('localhost/')
+  block:
+    - name: Ensure the ArtiDezi orchestrator container image is pulled via community.docker.docker_image_pull
+      when: devture_systemd_docker_base_container_image_pull_method == 'ansible-module'
+      community.docker.docker_image_pull:
+        name: "{{ artidezi_orchestrator_container_image }}"
+        pull: always
+      register: artidezi_orchestrator_container_image_pull_result_ansible_module
+      retries: "{{ devture_playbook_help_container_retries_count }}"
+      delay: "{{ devture_playbook_help_container_retries_delay }}"
+      until: artidezi_orchestrator_container_image_pull_result_ansible_module is not failed
+
+    - name: Ensure the ArtiDezi orchestrator container image is pulled via ansible.builtin.command
+      when: devture_systemd_docker_base_container_image_pull_method == 'command'
+      ansible.builtin.command:
+        cmd: "{{ devture_systemd_docker_base_host_command_docker }} pull {{ artidezi_orchestrator_container_image }}"
+      register: artidezi_orchestrator_container_image_pull_result_command
+      retries: "{{ devture_playbook_help_container_retries_count }}"
+      delay: "{{ devture_playbook_help_container_retries_delay }}"
+      until: artidezi_orchestrator_container_image_pull_result_command is not failed
+      changed_when: "'Downloaded newer image' in artidezi_orchestrator_container_image_pull_result_command.stdout"
+
+# An image under `localhost/` is not in any registry: someone built or loaded it on the host.
+- name: Check that the ArtiDezi orchestrator container image is on the host
+  when: artidezi_orchestrator_container_image.startswith('localhost/')
+  ansible.builtin.command:
+    cmd: "{{ devture_systemd_docker_base_host_command_docker }} image inspect --format '{{ '{{' }} .Id {{ '}}' }}' {{ artidezi_orchestrator_container_image }}"
+  changed_when: false
+  check_mode: false
+
+- name: Ensure the ArtiDezi orchestrator container network is created via community.docker.docker_network
+  when: devture_systemd_docker_base_container_network_creation_method == 'ansible-module'
+  community.docker.docker_network:
+    enable_ipv6: "{{ devture_systemd_docker_base_ipv6_enabled }}"
+    name: "{{ artidezi_orchestrator_container_network }}"
+    driver: bridge
+    driver_options: "{{ devture_systemd_docker_base_container_networks_driver_options }}"
+  register: artidezi_orchestrator_network_creation_result_ansible_module
+
+- name: Ensure the ArtiDezi orchestrator container network is created via ansible.builtin.command
+  when: devture_systemd_docker_base_container_network_creation_method == 'command'
+  ansible.builtin.command:
+    cmd: >-
+      {{ devture_systemd_docker_base_host_command_docker }} network create
+      {% if devture_systemd_docker_base_ipv6_enabled %}--ipv6{% endif %}
+      {{ devture_systemd_docker_base_container_networks_driver_options_string }}
+      {{ artidezi_orchestrator_container_network }}
+  register: artidezi_orchestrator_network_creation_result_command
+  changed_when: artidezi_orchestrator_network_creation_result_command.rc == 0
+  failed_when: artidezi_orchestrator_network_creation_result_command.rc != 0 and 'already exists' not in artidezi_orchestrator_network_creation_result_command.stderr
+
+- name: Ensure ArtiDezi orchestrator helper scripts are installed
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/bin/check-config.j2"
+    dest: "{{ artidezi_orchestrator_bin_path }}/check-config"
+    mode: '0750'
+    owner: root
+    group: root
+
+# The configuration goes through a candidate file on every run, even when it did not change:
+# the image may have, and an image that rejects the configuration would otherwise only show up as a crash loop.
+# A candidate that ArtiDezi rejects changes neither the installed configuration nor the secrets.
+# The GitHub check needs the secrets, so a failure there leaves the new secrets in place, next to the old configuration.
+# In check mode, the image may not be on the host yet, so nothing gets validated.
+- name: Allocate a candidate ArtiDezi orchestrator configuration file
+  ansible.builtin.tempfile:
+    state: file
+    path: "{{ artidezi_orchestrator_config_path }}"
+    prefix: artidezi.yaml.
+    suffix: .candidate
+  register: artidezi_orchestrator_config_candidate
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Validate and install the ArtiDezi orchestrator configuration and secrets
+  block:
+    # The configuration may hold password hashes of web UI accounts.
+    - name: Render the candidate ArtiDezi orchestrator configuration
+      ansible.builtin.template:
+        src: "{{ role_path }}/templates/artidezi.yaml.j2"
+        dest: "{{ artidezi_orchestrator_config_candidate.path }}"
+        mode: '0440'
+        owner: root
+        group: "{{ artidezi_orchestrator_gid }}"
+      changed_when: false
+      when: not ansible_check_mode
+      no_log: true
+      diff: false
+
+    - name: Validate the candidate ArtiDezi orchestrator configuration
+      ansible.builtin.command:
+        argv:
+          - "{{ artidezi_orchestrator_bin_path }}/check-config"
+          - "{{ artidezi_orchestrator_config_candidate.path }}"
+      register: artidezi_orchestrator_config_validation
+      changed_when: false
+      failed_when: false
+      when: not ansible_check_mode
+      # Parse errors quote the lines around the problem.
+      no_log: true
+
+    # Only the summary lines, as they don't quote the configuration.
+    - name: Fail if the candidate ArtiDezi orchestrator configuration is invalid
+      ansible.builtin.fail:
+        msg: "{{ artidezi_orchestrator_config_validation.stderr_lines | select('match', '^(Error: |- )') | list }}"
+      when: not ansible_check_mode and artidezi_orchestrator_config_validation.rc != 0
+
+    - name: Ensure ArtiDezi orchestrator secrets are installed
+      ansible.builtin.copy:
+        content: "{{ item.value | trim }}\n"
+        dest: "{{ artidezi_orchestrator_secrets_path }}/{{ item.key }}"
+        mode: '0440'
+        owner: root
+        group: "{{ artidezi_orchestrator_gid }}"
+      loop: "{{ artidezi_orchestrator_secrets | dict2items }}"
+      register: artidezi_orchestrator_secrets_result
+      no_log: true
+      diff: false
+
+    - name: Find ArtiDezi orchestrator secrets
+      ansible.builtin.find:
+        paths: "{{ artidezi_orchestrator_secrets_path }}"
+        hidden: true
+      register: artidezi_orchestrator_secrets_found
+      no_log: true
+
+    - name: Ensure removed ArtiDezi orchestrator secrets don't exist
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ artidezi_orchestrator_secrets_found.files | map(attribute='path') | map('basename') | reject('in', artidezi_orchestrator_secrets | list) | map('regex_replace', '^', artidezi_orchestrator_secrets_path + '/') | list }}"
+      register: artidezi_orchestrator_secrets_removal_result
+      no_log: true
+
+    # Needs the secrets. It only reads from GitHub.
+    - name: Check the candidate ArtiDezi orchestrator configuration against GitHub
+      ansible.builtin.command:
+        cmd: >-
+          {{ devture_systemd_docker_base_host_command_docker }} run --rm --pull=never
+          --network={{ artidezi_orchestrator_container_network }}
+          --read-only
+          --cap-drop=ALL
+          --security-opt=no-new-privileges
+          --user={{ artidezi_orchestrator_uid }}:{{ artidezi_orchestrator_gid }}
+          --mount type=bind,src={{ artidezi_orchestrator_config_candidate.path }},dst=/config.yaml,ro
+          --mount type=bind,src={{ artidezi_orchestrator_secrets_path }},dst=/secrets,ro
+          {{ artidezi_orchestrator_container_image }}
+          github-check --config /config.yaml --secrets-dir /secrets --forge {{ item | quote }}
+      loop: "{{ artidezi_orchestrator_github_check_forges }}"
+      register: artidezi_orchestrator_github_check
+      changed_when: false
+      failed_when: false
+      when: not ansible_check_mode
+      no_log: true
+
+    - name: Fail if the GitHub check of the candidate ArtiDezi orchestrator configuration failed
+      ansible.builtin.fail:
+        msg: "{{ item.stderr_lines | select('match', '^Error: ') | list }}"
+      loop: "{{ artidezi_orchestrator_github_check.results | default([]) | selectattr('rc', 'defined') | rejectattr('rc', 'equalto', 0) | list }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Ensure the validated ArtiDezi orchestrator configuration is installed
+      ansible.builtin.copy:
+        src: "{{ artidezi_orchestrator_config_candidate.path }}"
+        remote_src: true
+        dest: "{{ artidezi_orchestrator_config_path }}/artidezi.yaml"
+        mode: '0440'
+        owner: root
+        group: "{{ artidezi_orchestrator_gid }}"
+      register: artidezi_orchestrator_config_result
+      when: not ansible_check_mode
+      no_log: true
+      diff: false
+  always:
+    - name: Ensure the candidate ArtiDezi orchestrator configuration doesn't exist
+      ansible.builtin.file:
+        path: "{{ artidezi_orchestrator_config_candidate.path }}"
+        state: absent
+      changed_when: false
+      when: not ansible_check_mode
+
+- name: Ensure ArtiDezi orchestrator container labels are installed
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/labels.j2"
+    dest: "{{ artidezi_orchestrator_base_path }}/labels"
+    mode: '0400'
+    owner: root
+    group: root
+  register: artidezi_orchestrator_labels_result
+
+- name: Ensure the ArtiDezi orchestrator systemd service is installed
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/systemd/artidezi-orchestrator.service.j2"
+    dest: "{{ devture_systemd_docker_base_systemd_path }}/{{ artidezi_orchestrator_identifier }}.service"
+    mode: '0644'
+  register: artidezi_orchestrator_systemd_service_result
+
+- name: Ensure systemd is reloaded  # noqa no-handler
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: artidezi_orchestrator_systemd_service_result is changed
+
+# The orchestrator reads its configuration and secrets only when it starts.
+- name: Determine whether the ArtiDezi orchestrator needs a restart
+  ansible.builtin.set_fact:
+    artidezi_orchestrator_restart_necessary: >-
+      {{
+        artidezi_orchestrator_config_result is changed
+        or artidezi_orchestrator_secrets_result is changed
+        or artidezi_orchestrator_secrets_removal_result is changed
+        or artidezi_orchestrator_labels_result is changed
+        or artidezi_orchestrator_systemd_service_result is changed
+        or artidezi_orchestrator_container_image_pull_result_ansible_module.changed | default(false)
+        or artidezi_orchestrator_container_image_pull_result_command.changed | default(false)
+        or artidezi_orchestrator_network_creation_result_ansible_module.changed | default(false)
+        or artidezi_orchestrator_network_creation_result_command.changed | default(false)
+      }}
