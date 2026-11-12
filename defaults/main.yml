@@ -28,7 +28,7 @@ artidezi_orchestrator_gid: ""
 # Updates are never automerged: these versions carry no compatibility meaning, and workers have to be upgraded along with the orchestrator.
 # The role's own tags are `v<artidezi_orchestrator_version>-<release>` (see bin/compute-next-tag.sh).
 # renovate: datasource=docker depName=ghcr.io/devture/artidezi versioning=loose
-artidezi_orchestrator_version: v2026.11.12.1
+artidezi_orchestrator_version: v2026.11.12.2
 
 # An image under `localhost/` is never pulled: it has to be on the host already (built or loaded by hand), or the role fails.
 artidezi_orchestrator_container_image: "{{ artidezi_orchestrator_container_image_registry_prefix }}devture/artidezi:{{ artidezi_orchestrator_container_image_tag }}"
