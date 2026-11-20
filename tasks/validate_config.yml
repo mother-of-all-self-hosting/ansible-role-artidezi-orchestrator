@@ -9,7 +9,6 @@
     msg: "You need to define a required configuration setting (`{{ item }}`)."
   when: "lookup('vars', item, default='') | string | length == 0"
   with_items:
-    - artidezi_orchestrator_identifier
     - artidezi_orchestrator_uid
     - artidezi_orchestrator_gid
     - artidezi_orchestrator_container_image
