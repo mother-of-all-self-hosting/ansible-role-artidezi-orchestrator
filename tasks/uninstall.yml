@@ -19,7 +19,7 @@
         state: stopped
         enabled: false
 
-    - name: Ensure the ArtiDezi orchestrator systemd service doesn't exist
+    - name: Ensure the ArtiDezi orchestrator systemd service does not exist
       ansible.builtin.file:
         path: "{{ devture_systemd_docker_base_systemd_path }}/{{ artidezi_orchestrator_identifier }}.service"
         state: absent
