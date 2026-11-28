@@ -1,4 +1,5 @@
-# SPDX-FileCopyrightText: 2026 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2023, 2026 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2025, 2026 Suguru Hirahara
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -27,22 +28,24 @@
       ansible.builtin.systemd_service:
         daemon_reload: true
 
-- name: Ensure the ArtiDezi orchestrator container network doesn't exist
-  when: artidezi_orchestrator_container_network_deletion_enabled | bool
+- name: Ensure the ArtiDezi orchestrator container network does not exist
+  when: artidezi_orchestrator_container_network_deletion_enabled and artidezi_orchestrator_container_network != 'host'
   block:
-    - name: Ensure the ArtiDezi orchestrator container network doesn't exist via community.docker.docker_network
+    - name: Ensure the ArtiDezi orchestrator container network does not exist via community.docker.docker_network
       when: devture_systemd_docker_base_container_network_creation_method == 'ansible-module'
       community.docker.docker_network:
         name: "{{ artidezi_orchestrator_container_network }}"
         state: absent
+      register: artidezi_orchestrator_network_deletion_result
 
-    - name: Ensure the ArtiDezi orchestrator container network doesn't exist via ansible.builtin.command
+    - name: Ensure the ArtiDezi orchestrator container network does not exist via ansible.builtin.command
       when: devture_systemd_docker_base_container_network_creation_method == 'command'
       ansible.builtin.command:
-        cmd: "{{ devture_systemd_docker_base_host_command_docker }} network rm {{ artidezi_orchestrator_container_network }}"
+        cmd: >-
+          {{ devture_systemd_docker_base_host_command_docker }} network rm
+          {{ artidezi_orchestrator_container_network }}
       register: artidezi_orchestrator_network_deletion_result
-      changed_when: artidezi_orchestrator_network_deletion_result.rc == 0
-      failed_when: artidezi_orchestrator_network_deletion_result.rc != 0 and 'not found' not in artidezi_orchestrator_network_deletion_result.stderr
+      changed_when: artidezi_orchestrator_container_network in artidezi_orchestrator_network_deletion_result.stdout
 
 - name: Ensure ArtiDezi orchestrator files don't exist
   ansible.builtin.file:

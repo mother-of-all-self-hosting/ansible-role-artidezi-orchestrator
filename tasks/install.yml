@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2026 Suguru Hirahara
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -50,26 +51,29 @@
   changed_when: false
   check_mode: false
 
-- name: Ensure the ArtiDezi orchestrator container network is created via community.docker.docker_network
-  when: devture_systemd_docker_base_container_network_creation_method == 'ansible-module'
-  community.docker.docker_network:
-    enable_ipv6: "{{ devture_systemd_docker_base_ipv6_enabled }}"
-    name: "{{ artidezi_orchestrator_container_network }}"
-    driver: bridge
-    driver_options: "{{ devture_systemd_docker_base_container_networks_driver_options }}"
-  register: artidezi_orchestrator_network_creation_result_ansible_module
+- name: Run if 'host' network is not specified to be used
+  when: artidezi_orchestrator_container_network != 'host'
+  block:
+    - name: Ensure the ArtiDezi orchestrator container network is created via community.docker.docker_network
+      when: devture_systemd_docker_base_container_network_creation_method == 'ansible-module'
+      community.docker.docker_network:
+        enable_ipv6: "{{ devture_systemd_docker_base_ipv6_enabled }}"
+        name: "{{ artidezi_orchestrator_container_network }}"
+        driver: bridge
+        driver_options: "{{ devture_systemd_docker_base_container_networks_driver_options }}"
+      register: artidezi_orchestrator_network_creation_result_ansible_module
 
-- name: Ensure the ArtiDezi orchestrator container network is created via ansible.builtin.command
-  when: devture_systemd_docker_base_container_network_creation_method == 'command'
-  ansible.builtin.command:
-    cmd: >-
-      {{ devture_systemd_docker_base_host_command_docker }} network create
-      {% if devture_systemd_docker_base_ipv6_enabled %}--ipv6{% endif %}
-      {{ devture_systemd_docker_base_container_networks_driver_options_string }}
-      {{ artidezi_orchestrator_container_network }}
-  register: artidezi_orchestrator_network_creation_result_command
-  changed_when: artidezi_orchestrator_network_creation_result_command.rc == 0
-  failed_when: artidezi_orchestrator_network_creation_result_command.rc != 0 and 'already exists' not in artidezi_orchestrator_network_creation_result_command.stderr
+    - name: Ensure the ArtiDezi orchestrator container network is created via ansible.builtin.command
+      when: devture_systemd_docker_base_container_network_creation_method == 'command'
+      ansible.builtin.command:
+        cmd: >-
+          {{ devture_systemd_docker_base_host_command_docker }} network create
+          {% if devture_systemd_docker_base_ipv6_enabled %}--ipv6{% endif %}
+          {{ devture_systemd_docker_base_container_networks_driver_options_string }}
+          {{ artidezi_orchestrator_container_network }}
+      register: artidezi_orchestrator_network_creation_result_command
+      changed_when: artidezi_orchestrator_network_creation_result_command.rc == 0
+      failed_when: artidezi_orchestrator_network_creation_result_command.rc != 0 and 'already exists' not in artidezi_orchestrator_network_creation_result_command.stderr
 
 - name: Ensure ArtiDezi orchestrator helper scripts are installed
   ansible.builtin.template:

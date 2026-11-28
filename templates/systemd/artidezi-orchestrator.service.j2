@@ -1,6 +1,8 @@
 #jinja2: lstrip_blocks: True
+
 {#
 SPDX-FileCopyrightText: 2026 Slavi Pantaleev
+SPDX-FileCopyrightText: 2026 Suguru Hirahara
 
 SPDX-License-Identifier: AGPL-3.0-or-later
 #}
@@ -51,9 +53,11 @@ ExecStartPre={{ devture_systemd_docker_base_host_command_docker }} create \
       --lease-ttl-seconds {{ artidezi_orchestrator_lease_ttl_seconds }} \
       --tick-seconds {{ artidezi_orchestrator_tick_seconds }}{% if artidezi_orchestrator_ui_enabled | bool %} --ui-enabled{% endif %}{% for arg in artidezi_orchestrator_process_extra_arguments %} {{ arg }}{% endfor %}
 
+{% if artidezi_orchestrator_container_network != 'host' %}
 {% for network in artidezi_orchestrator_container_additional_networks %}
 ExecStartPre={{ devture_systemd_docker_base_host_command_docker }} network connect {{ network }} {{ artidezi_orchestrator_identifier }}
 {% endfor %}
+{% endif %}
 
 ExecStart={{ devture_systemd_docker_base_host_command_docker }} start --attach {{ artidezi_orchestrator_identifier }}
 
